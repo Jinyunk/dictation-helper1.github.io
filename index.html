@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>听写小助手（中英文）</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <style>
+    body{font-family:ui-sans-serif,system-ui,"PingFang SC","Noto Sans SC",sans-serif;background:#f6f7fb}
+    .btn{padding:.75rem 1rem;border-radius:.8rem;font-weight:600}
+  </style>
+</head>
+<body class="p-4 md:p-8">
+  <div class="max-w-3xl mx-auto bg-white rounded-2xl shadow-lg p-6 md:p-10 space-y-6">
+    <header class="text-center space-y-2">
+      <h1 class="text-3xl font-bold">📝 听写小助手（中英文）</h1>
+      <p class="text-gray-600">输入或拍照识别生词表 → 设置停顿 → 听写 → 勾错 → 只重听错词</p>
+    </header>
+
+    <!-- Step 1: 输入词表 -->
+    <section class="space-y-3">
+      <h2 class="text-xl font-semibold text-blue-700">步骤 1：准备词语</h2>
+      <div class="flex gap-2 flex-wrap">
+        <button id="modeManual" class="btn bg-blue-50 text-blue-700">手动输入</button>
+        <button id="modeOCR" class="btn bg-gray-100">拍照识字（印刷体）</button>
+      </div>
+
+      <div id="manualPanel" class="space-y-2">
+        <textarea id="wordInput" rows="6" class="w-full border rounded-lg p-3" placeholder="用逗号、空格或换行分隔；英文会自动小写。\n例：苹果, 香蕉, 朋友\n例：apple orange friend"></textarea>
+      </div>
+
+      <div id="ocrPanel" class="space-y-3 hidden">
+        <input id="ocrFile" type="file" accept="image/*" class="hidden" />
+        <label for="ocrFile" class="block w-full border-2 border-dashed rounded-xl p-6 text-center cursor-pointer text-gray-600">点击或拖拽上传生词表照片（印刷体）</label>
+        <progress id="ocrProgress" value="0" max="1" class="w-full hidden"></progress>
+        <div>
+          <p class="text-sm text-gray-600 mb-1">识别结果（可编辑）：</p>
+          <div id="ocrText" class="min-h-[80px] border rounded-lg p-3" contenteditable="true"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 2: 设置与语言 -->
+    <section class="space-y-3">
+      <h2 class="text-xl font-semibold text-blue-700">步骤 2：听写设置</h2>
+      <div class="grid md:grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm text-gray-700">科目/语言</label>
+          <select id="langSelect" class="w-full border rounded-lg p-2">
+            <option value="zh">语文（中文）</option>
+            <option value="en">英语（English）</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm text-gray-700">间隔（每个词停顿秒数）：<b id="secView">3</b>s</label>
+          <input id="gapSec" type="range" min="1" max="15" value="3" class="w-full" />
+        </div>
+        <div>
+          <label class="block text-sm text-gray-700">朗读声音（设备可用的为准）</label>
+          <select id="voiceSelect" class="w-full border rounded-lg p-2"></select>
+        </div>
+        <div class="flex items-end">
+          <button id="startBtn" class="btn w-full bg-blue-600 text-white">开始听写</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 3: 听写控制 -->
+    <section id="runPanel" class="hidden space-y-4">
+      <h2 class="text-xl font-semibold text-green-700">听写进行中</h2>
+      <div class="text-center bg-gray-50 rounded-xl p-6">
+        <p class="text-gray-500">当前词语</p>
+        <p id="nowWord" class="text-3xl font-bold">…</p>
+      </div>
+      <div class="grid grid-cols-3 gap-3">
+        <button id="repeatBtn" class="btn bg-amber-500 text-white">重听</button>
+        <button id="pauseBtn" class="btn bg-gray-500 text-white">暂停</button>
+        <button id="stopBtn" class="btn bg-red-600 text-white">停止</button>
+      </div>
+    </section>
+
+    <!-- Step 4: 勾选错词 -->
+    <section id="reviewPanel" class="hidden space-y-3">
+      <h2 class="text-xl font-semibold text-purple-700">检查与仅重听错词</h2>
+      <div id="listWrap" class="max-h-60 overflow-y-auto border rounded-lg p-3 space-y-2"></div>
+      <button id="redoBtn" class="btn w-full bg-purple-600 text-white">仅重听错词</button>
+    </section>
+  </div>
+
+  <script>
+  const $ = (id)=>document.getElementById(id);
+  const state = { words:[], index:0, paused:false, gap:3000, voices:[], lang:'zh', utter:null, speaking:false };
+
+  // 切换面板
+  $('modeManual').onclick=()=>{ $('manualPanel').classList.remove('hidden'); $('ocrPanel').classList.add('hidden'); };
+  $('modeOCR').onclick=()=>{ $('manualPanel').classList.add('hidden'); $('ocrPanel').classList.remove('hidden'); };
+
+  // 间隔
+  $('gapSec').oninput=(e)=>{ state.gap=e.target.value*1000; $('secView').innerText=e.target.value; };
+
+  // 语音
+  const synth = window.speechSynthesis;
+  function loadVoices(){
+    const all = synth.getVoices();
+    // 优先中文/英文
+    state.voices = all.filter(v=> v.lang.startsWith('zh') || v.lang.startsWith('en'));
+    const sel = $('voiceSelect'); sel.innerHTML='';
+    state.voices.forEach(v=>{ const o=document.createElement('option'); o.value=v.name; o.textContent=`${v.name} (${v.lang})`; sel.appendChild(o); });
+  }
+  loadVoices(); if(synth.onvoiceschanged!==undefined){ synth.onvoiceschanged=loadVoices; }
+
+  // OCR 识别
+  let worker=null; (async()=>{ worker = await Tesseract.createWorker('chi_sim+eng', 1, { logger:m=>{ if(m.progress!=null){ $('ocrProgress').classList.remove('hidden'); $('ocrProgress').value=m.progress; } } }); })();
+  $('ocrFile').addEventListener('change', async (e)=>{
+    const f = e.target.files?.[0]; if(!f||!worker) return; const { data:{ text } } = await worker.recognize(f);
+    $('ocrText').textContent = text.replace(/\s+/g,'\n');
+    $('ocrProgress').classList.add('hidden');
+  });
+
+  function normalizeWords(raw, lang){
+    return raw.split(/[\s,，\n]+/).map(w=>w.trim()).filter(Boolean).map(w=> lang==='en' ? w.toLowerCase() : w);
+  }
+
+  function buildListUI(){
+    const wrap=$('listWrap'); wrap.innerHTML='';
+    state.words.forEach((w,i)=>{
+      const id=`w_${i}`; const row=document.createElement('label'); row.className='flex items-center gap-2 bg-white rounded-md p-2 shadow-sm';
+      row.innerHTML=`<input type="checkbox" id="${id}" value="${w}" class="h-5 w-5 text-red-600"> <span class="text-gray-800">${w}</span>`;
+      wrap.appendChild(row);
+    });
+  }
+
+  function speak(text){
+    if(!text) return; synth.cancel(); const u = new SpeechSynthesisUtterance(text);
+    const name=$('voiceSelect').value; const v=state.voices.find(x=>x.name===name);
+    if(v){ u.voice=v; u.lang=v.lang; } else { u.lang = state.lang==='zh'?'zh-CN':'en-US'; }
+    u.rate = state.lang==='en'? 0.95 : 0.9; // 英文略快
+    $('nowWord').textContent = text;
+    state.speaking=true; u.onend=()=>{ state.speaking=false; if(!state.paused){ setTimeout(nextWord, state.gap); } };
+    synth.speak(u); state.utter=u;
+  }
+
+  function nextWord(){
+    if(state.paused) return; state.index++;
+    if(state.index < state.words.length){ speak(state.words[state.index]); }
+    else { $('stopBtn').click(); $('reviewPanel').classList.remove('hidden'); }
+  }
+
+  $('startBtn').onclick=()=>{
+    const lang = $('langSelect').value; state.lang=lang;
+    let raw = $('manualPanel').classList.contains('hidden') ? $('ocrText').textContent : $('wordInput').value;
+    const ws = normalizeWords(raw, lang); if(ws.length===0){ alert('词语列表不能为空'); return; }
+    state.words=ws; state.index=0; state.paused=false;
+    buildListUI(); $('runPanel').classList.remove('hidden'); $('reviewPanel').classList.add('hidden');
+    speak(state.words[0]);
+  };
+
+  $('repeatBtn').onclick=()=>{ const i=Math.max(0,state.index); speak(state.words[i]); };
+  $('pauseBtn').onclick=()=>{ if(state.paused){ state.paused=false; synth.resume(); if(!state.speaking) nextWord(); $('pauseBtn').textContent='暂停'; } else { state.paused=true; synth.pause(); $('pauseBtn').textContent='继续'; } };
+  $('stopBtn').onclick=()=>{ synth.cancel(); state.paused=false; $('runPanel').classList.add('hidden'); $('reviewPanel').classList.remove('hidden'); };
+
+  $('redoBtn').onclick=()=>{
+    const wrong=[...document.querySelectorAll('#listWrap input:checked')].map(x=>x.value);
+    if(wrong.length===0){ alert('请先勾选错误的词语'); return; }
+    state.words=wrong; state.index=0; state.paused=false; buildListUI(); $('runPanel').classList.remove('hidden'); $('reviewPanel').classList.add('hidden'); speak(state.words[0]);
+  };
+  </script>
+</body>
+</html>
